@@ -25,5 +25,25 @@ Prompts and agent interactions here feed the article.
   (2) the uploaded credit-card export shows purchases as positive numbers, while SpendSense assumed negative = spending
 - Fixes: the AI notice now shows the reason and a Retry button; the loader detects positive-purchase files and flips
   them (with a per-file override), and reads Debit/Credit columns, headerless files and other column names
-- Tests: 24 automated checks pass; positive-purchase card file checked in the browser
+- Also: Scotiabank exports give unsigned amounts plus a "Type of Transaction" (Debit/Credit) column; the loader now uses it
+- Tests: 25 automated checks pass; positive-purchase card file checked in the browser
 - Next step: add the API key in Streamlit Secrets, read the reason shown if insights still fail, run tests 4 and 5
+
+### 24 Nov 2026 | AI reliability and better categories
+- Who: David, with Claude (claude.ai)
+- Problems found: (1) AI categories failed with "Reason: unknown"; (2) AI insights sometimes failed with "not in the
+  expected format" and worked after Retry; (3) many real transactions unplaced, including Walmart, Amazon, Dollarama
+  and restaurants
+- Causes: (1) real files have many unknown merchants, so Claude's single long answer was cut off and could not be
+  read, and that failure was not reported; (2) Claude sometimes wrapped its JSON in extra text; (3) the merchant rules
+  were a short starter list, and "Walmart" was filed under Groceries
+- Fixes: both AI jobs now use a forced tool call with a JSON schema (structured output); categories go in batches of
+  60; about 600 merchant patterns for Canadian chains, card-processor prefixes (TST*, DD *, SQ *) and food words; Walmart,
+  Amazon and Dollarama are Shopping; new Travel category; "Other" became Miscellaneous, which also holds anything
+  neither the rules nor Claude could place; the page shows the share placed by rules, by Claude and not at all
+- Bugs found while testing the rules: SHAW (the cable company) matched SHAWARMA, ESSO (gas) matched ESPRESSO,
+  RENT matched RENT-A-CAR, and SEND E-TFR was treated as a transfer between own accounts; all fixed with word
+  boundaries and rule order
+- Tests: 27 automated checks pass; rules place 166/167 sample merchants (scripts/rule_coverage.py); the AI path was
+  checked against a simulated Claude API
+- Next step: try real files again with the API key and note the share placed by rules vs Claude

@@ -15,8 +15,8 @@ from dotenv import load_dotenv
 from core import ai
 from core.analysis import (PAY_PERIODS_PER_YEAR, allowed_numbers, facts_for_ai, monthly_income,
                            saving_suggestion, summarize)
-from core.categorize import (ALL_CHOICES, INCOMING, NEEDS_REVIEW, TRANSFERS, apply_rules,
-                             unplaced_merchants)
+from core.categorize import (ALL_CHOICES, EXCLUDED, INCOMING, MISC, TRANSFERS, apply_rules,
+                             finish_unplaced, unplaced_merchants)
 from core.loader import combine
 
 load_dotenv()
@@ -65,7 +65,7 @@ def load_files(files: list[tuple[str, bytes]], flips: dict | None = None):
                 mask = tx["Description"] == desc
                 tx.loc[mask, "Category"] = cat
                 tx.loc[mask, "Source"] = "AI-suggested"
-    st.session_state.tx = tx
+    st.session_state.tx = finish_unplaced(tx)
 
 
 for k, v in {"tx": None, "problems": [], "notes": [], "ai_cache": {}, "ai_categories": "off", "files": [],
@@ -133,26 +133,39 @@ with st.expander("How your files were read", expanded=any(i["flipped"] for i in 
         if info["debit_credit"]:
             st.write(f"**{info['file']}**: separate Debit and Credit columns (Debit = spending).")
             continue
+        if info["direction"]:
+            st.write(f"**{info['file']}**: the \"{info['direction']}\" column says Debit (spending) or Credit "
+                     "(payments and refunds, ignored).")
+            continue
         options = ["Negative numbers (e.g. -45.00)", "Positive numbers (e.g. 45.00)"]
         choice = st.radio(f"In **{info['file']}**, spending is shown as:", options,
                           index=1 if info["flipped"] else 0, horizontal=True, key=f"flip_{info['file']}")
         new_flips[info["file"]] = choice == options[1]
-    if any(new_flips.get(i["file"], i["flipped"]) != i["flipped"] for i in st.session_state.infos if not i["debit_credit"]):
+    if any(new_flips.get(i["file"], i["flipped"]) != i["flipped"] for i in st.session_state.infos
+           if not i["debit_credit"] and not i["direction"]):
         load_files(st.session_state.files, new_flips)
         st.rerun()
 
 if st.session_state.ai_categories == "unavailable":
-    st.warning("AI category suggestions are unavailable, so merchants the rules could not place are marked "
-               "\"Needs review\". You can set their category in the table.  \n"
+    st.warning("AI category suggestions are unavailable, so merchants the rules could not place were put in "
+               "Miscellaneous (tagged Unplaced). You can set their category in the table.  \n"
                f"**Reason:** {st.session_state.ai_cat_error or 'unknown'}")
+
+spend_rows = tx[~tx["Category"].isin(EXCLUDED)]
+if len(spend_rows):
+    by_rule = (spend_rows["Source"].isin(["Rule", "You"]) & (spend_rows["Category"] != MISC)).mean()
+    by_ai = (spend_rows["Source"] == "AI-suggested").mean()
+    unplaced = (spend_rows["Source"] == "Unplaced").mean()
+    st.caption(f"Categorized: {by_rule:.0%} by merchant rules, {by_ai:.0%} by Claude, "
+               f"{unplaced:.0%} unplaced (in Miscellaneous, tagged Unplaced).")
 
 # ---------- transactions with editable categories ----------
 st.subheader("1. Check the categories")
 st.caption("Change any category in the Category column. Totals below update straight away.")
 show = tx[["Date", "Description", "Amount", "Bank", "Category", "Source"]].copy()
 show["Date"] = show["Date"].dt.date
-review_first = st.toggle("Show only items to review (Needs review or AI-suggested)", value=False)
-view = show[show["Source"].isin(["Unplaced", "AI-suggested"]) | (show["Category"] == NEEDS_REVIEW)] if review_first else show
+review_first = st.toggle("Show only items to review (Unplaced or AI-suggested)", value=False)
+view = show[show["Source"].isin(["Unplaced", "AI-suggested"])] if review_first else show
 edited = st.data_editor(
     view, key=f"editor_{review_first}", hide_index=True, use_container_width=True, height=320,
     disabled=["Date", "Description", "Amount", "Bank", "Source"],

@@ -18,14 +18,18 @@ Team: Alizeh Chaudhry, Angela Joseph, Justin Liu, Tara O'Desse, David Osah.
 
 - **Multi-bank upload.** One CSV per bank. Reads SpendSense's own layout (Date, Description, Amount, Bank) and common
   bank exports: other column names (Transaction Date, CAD$, Description 1/2), separate Debit/Credit or
-  Withdrawals/Deposits columns, files with no header row (TD/CIBC style), and credit cards that show purchases as
+  Withdrawals/Deposits columns, files with no header row (TD/CIBC style), a Debit/Credit "Type of Transaction" column with unsigned amounts
+  (Scotiabank style), and credit cards that show purchases as
   positive numbers (detected automatically, with a per-file override under *How your files were read*). Account
   numbers, balances and any other extra columns are dropped first.
 - **No double counting.** Money coming in (pay, refunds) is ignored. Credit-card payments and transfers between
   your own accounts go to *Transfers (excluded)*.
-- **Categories you can fix.** Merchant rules place most transactions. Claude suggests a category for the rest,
-  tagged *AI-suggested*. Anything still unplaced is marked *Needs review*. Change any category in one click and
-  every total updates.
+- **Categories you can fix.** About 600 merchant patterns for Canadian chains and common words (Walmart, AMZN,
+  Dollarama, Tim Hortons, "TST*" restaurant payments, PIZZA, SUSHI and so on) place most transactions. Claude
+  suggests a category for the rest, tagged *AI-suggested*. Anything still unplaced goes to *Miscellaneous*, tagged
+  *Unplaced*. The page shows what share was placed by rules, by Claude and not at all. Change any category in one
+  click and every total updates. Categories: Housing, Groceries, Dining Out, Transport, Subscriptions, Shopping,
+  Bills & Utilities, Health & Personal, Entertainment, Travel, Miscellaneous.
 - **Where your money went.** Totals by category, a bar chart, and the change from last month. Enter your
   take-home pay (optional) to see each category as a share of income and your savings rate.
 - **3-4 plain-language insights** written by Claude from the calculated totals.
@@ -53,6 +57,8 @@ CSV files ──► loader.py ──► categorize.py ──► analysis.py ─�
 | Insights and suggestion wording | Claude (`core/ai.py`) | category totals and percentages, never transactions or the income amount |
 
 Safeguards in `core/ai.py`:
+- Claude answers through a forced tool call with a fixed schema (structured output), so replies are always in a
+  readable format. Category requests are sent in batches of 60 so long lists are not cut off.
 - Every dollar figure and percentage in Claude's text is compared with the calculated numbers. An insight with a
   number that does not match is hidden, and the page says how many were hidden.
 - Text that mentions investing, credit, loans or tax is hidden.
@@ -95,13 +101,13 @@ planted so that testers know the right answer:
 
 ## Test evidence
 
-**Automated:** `python -m pytest -q` runs 24 checks (24 passed on 22 Nov 2026):
+**Automated:** `python -m pytest -q` runs 27 checks (27 passed on 24 Nov 2026):
 combining two banks into 65 rows with no account numbers, $87.00 subscriptions, dining $437.00 to $612.00
 (+40.0%), fixing a category updates the total, card payments excluded, income conversion (2,000 bi-weekly =
 $4,333.33 a month), dining = 14.1% of income, both saving suggestions, the three bad files, odd amounts, the
 2,000-row file, the number check, the advice filter, the no-API-key fallback and its message, a rejected API key,
 and real-bank layouts (positive credit-card purchases, sign override, RBC-style columns, TD-style file with no header,
-BMO-style compact dates, Withdrawals/Deposits columns).
+BMO-style compact dates, Withdrawals/Deposits columns, Scotiabank "Type of Transaction" column).
 
 **Click-through:** the acceptance tests in `PRD.md` are run by a person before each saved version. Results:
 
@@ -109,7 +115,7 @@ BMO-style compact dates, Withdrawals/Deposits columns).
 |---|---|---|---|---|
 | 1 | Two Priya files combine to 65 rows, no account numbers | Pass (screenshot above) | 21 Nov 2026 | Claude (automated browser) |
 | 2 | Subscriptions for March show $87.00 | Pass (screenshot above) | 21 Nov 2026 | Claude (automated browser) |
-| 3 | Change `SQ *MOUNTAIN BREW` to Dining Out: Dining Out becomes $618.75 | Pass ([screenshot](docs/screenshots/after_category_fix.png)) | 21 Nov 2026 | Claude (automated browser) |
+| 3 | Change `SQ *MOUNTAIN BREW` (Unplaced, or AI-suggested with a key) to Dining Out: Dining Out becomes $618.75 | Pass ([screenshot](docs/screenshots/after_category_fix.png)) | 21 Nov 2026 | Claude (automated browser) |
 | 6 | Income $2,000 bi-weekly: $4,333.33/month, Dining Out 14.1% | Pass (screenshot above) | 21 Nov 2026 | Claude (automated browser) |
 | 7 | $1,250 card payment excluded; incoming transactions ignored, with notes | Pass (screenshot above) | 21 Nov 2026 | Claude (automated browser) |
 | 8 | PDF, missing Amount and empty file each give a plain message | Pass ([screenshot](docs/screenshots/error_messages.png)) | 21 Nov 2026 | Claude (automated browser) |
@@ -121,7 +127,9 @@ BMO-style compact dates, Withdrawals/Deposits columns).
 
 - Bank exports vary. Common Canadian layouts are handled, but an unusual file may need its columns renamed or its
   spending sign set by hand under *How your files were read*.
-- Merchant rules are a starter list for Calgary-area merchants. Unknown merchants depend on Claude or the user.
+- Merchant rules place 166 of the 167 sample merchant descriptions in `tests/merchant_samples.csv` correctly
+  (`python scripts/rule_coverage.py`). That list was written alongside the rules, so real files score lower; small
+  independent businesses depend on Claude or the user.
 - Refunds are ignored as money in, so a refunded purchase still counts as spending.
 - A transfer to another person (for example, rent by e-transfer) is counted as spending unless the user changes it.
 - The saving estimate for subscriptions uses the two cheapest subscriptions, because the app cannot know which

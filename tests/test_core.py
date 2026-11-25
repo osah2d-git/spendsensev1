@@ -11,7 +11,7 @@ import pytest
 from core import ai
 from core.analysis import (allowed_numbers, facts_for_ai, monthly_income, saving_suggestion,
                            summarize)
-from core.categorize import INCOMING, NEEDS_REVIEW, TRANSFERS, apply_rules
+from core.categorize import INCOMING, MISC, NEEDS_REVIEW, TRANSFERS, apply_rules, finish_unplaced
 from core.loader import combine
 
 DATA = Path(__file__).resolve().parent.parent / "data"
@@ -26,7 +26,7 @@ def load(*names, folder="sample"):
 def priya():
     tx, problems, notes = load("priya_northern_chequing.csv", "priya_prairie_visa.csv")
     assert problems == []
-    return apply_rules(tx)
+    return finish_unplaced(apply_rules(tx))  # same steps as the app when AI is off
 
 
 @pytest.fixture
@@ -55,9 +55,9 @@ def test_dining_rises_437_to_612(priya):
     assert r["Change %"] == pytest.approx(40.0)
 
 
-def test_unknown_merchant_needs_review_then_user_fix_updates_total(priya):
+def test_unknown_merchant_goes_to_miscellaneous_then_user_fix_updates_total(priya):
     row = priya["Description"] == "SQ *MOUNTAIN BREW"
-    assert (priya.loc[row, "Category"] == NEEDS_REVIEW).all()
+    assert (priya.loc[row, "Category"] == MISC).all() and (priya.loc[row, "Source"] == "Unplaced").all()
     priya.loc[row, "Category"] = "Dining Out"
     sm = summarize(priya)
     assert sm.totals.at["Dining Out", "2026-03"] == pytest.approx(618.75)
@@ -163,9 +163,10 @@ def test_ai_error_reason_is_reported(monkeypatch):
 def test_ai_output_is_filtered(monkeypatch, priya):
     sm = summarize(priya)
     facts = facts_for_ai(sm, saving_suggestion(sm))
-    fake = ('{"insights": ["Dining out grew 40.0% to $612.00.", "You spent $999.99 on fun.", '
-            '"Consider investing in an ETF."], "suggestion": "Try bringing dining back to $437.00 to save $2,100.00 a year."}')
-    monkeypatch.setattr(ai, "_ask", lambda *a, **k: fake)
+    fake = {"insights": ["Dining out grew 40.0% to $612.00.", "You spent $999.99 on fun.",
+                         "Consider investing in an ETF."],
+            "suggestion": "Try bringing dining back to $437.00 to save $2,100.00 a year."}
+    monkeypatch.setattr(ai, "_ask_tool", lambda *a, **k: fake)
     out = ai.write_insights(facts, allowed_numbers(facts))
     assert out["insights"] == ["Dining out grew 40.0% to $612.00."]
     assert out["dropped"] == 2
@@ -231,3 +232,48 @@ def test_withdrawals_and_deposits_columns():
     text = "Date,Description,Withdrawals,Deposits,Balance\n2026-03-02,SAFEWAY,54.20,,100\n2026-03-03,PAY,,500,600\n"
     tx, problems, _ = one("bank.csv", text)
     assert sorted(tx["Amount"]) == [-54.20, 500.0]
+
+
+def test_scotiabank_style_type_of_transaction_column():
+    text = ("Filter,Date,Description,Sub-description,Status,Type of Transaction,Amount,Associated card number\n"
+            ",2026-03-02,STARBUCKS 0391,CALGARY AB,Posted,Debit,5.25,4537 12** **** 3456\n"
+            ",2026-03-03,SAFEWAY #8890,CALGARY AB,Posted,Debit,80.10,4537 12** **** 3456\n"
+            ",2026-03-04,SPORT CHEK 312,CALGARY AB,Posted,Credit,39.99,4537 12** **** 3456\n"
+            ",2026-03-20,PAYMENT FROM - *****12*3456,,Posted,Credit,500.00,4537 12** **** 3456\n"
+            ",2026-03-21,UBER EATS,TORONTO ON,Pending,Debit,23.40,4537 12** **** 3456\n")
+    tx, problems, infos = one("scotia.csv", text)
+    tx = apply_rules(tx)
+    assert problems == [] and len(tx) == 5
+    assert infos[0]["direction"] == "Type of Transaction"
+    assert sorted(tx["Amount"]) == [-80.10, -23.40, -5.25, 39.99, 500.00]
+    assert tx.loc[tx["Description"].str.startswith("STARBUCKS"), "Category"].item() == "Dining Out"
+    assert "Associated card number" not in tx.columns
+    assert not tx.astype(str).apply(lambda c: c.str.contains("4537")).any().any()
+
+
+def test_rules_place_at_least_95_percent_of_common_merchants():
+    import csv
+    from core.categorize import rule_category
+    rows = list(csv.DictReader(open(Path(__file__).parent / "merchant_samples.csv")))
+    right = sum(rule_category(r["Description"], -10.0) == r["Expected"] for r in rows)
+    assert right / len(rows) >= 0.95
+    for d, cat in [("WAL-MART #3035 CALGARY AB", "Shopping"), ("AMZN Mktp CA*2K3LP9X12", "Shopping"),
+                   ("DOLLARAMA # 1129 CALGARY AB", "Shopping"), ("UBER CANADA/UBEREATS", "Dining Out"),
+                   ("OSMOWS SHAWARMA", "Dining Out"), ("ESPRESSO BAR CALGARY", "Dining Out"),
+                   ("SEND E-TFR ***Y8K", MISC), ("ENTERPRISE RENT-A-CAR", "Transport")]:
+        assert rule_category(d, -10.0) == cat, d
+
+
+def test_ai_categories_are_batched_and_validated(monkeypatch):
+    calls = []
+
+    def fake(system, user, tool, max_tokens=0):
+        calls.append(user)
+        n = user.count("\n")
+        return {"results": [{"id": i, "category": "Dining Out" if i % 2 else "Not a category"} for i in range(n)]}
+    monkeypatch.setattr(ai, "_ask_tool", fake)
+    descs = [f"SQ *PLACE {i}" for i in range(130)]
+    out = ai.suggest_categories(descs)
+    assert len(calls) == 3                       # 60 + 60 + 10
+    assert set(out.values()) == {"Dining Out"}   # invalid categories are dropped
+    assert len(out) == 65

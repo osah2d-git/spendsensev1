@@ -77,59 +77,95 @@ def _explain(e: Exception) -> str:
     return f"{type(e).__name__}: {text[:200]}"
 
 
-def _ask(system: str, user: str, max_tokens: int = 800) -> str | None:
+def _ask_tool(system: str, user: str, tool: dict, max_tokens: int = 2000) -> dict | None:
+    """Ask Claude to answer by filling in a tool's input schema.
+
+    Forcing a tool call makes Claude reply with structured data that matches the
+    schema, instead of free text that we would have to parse.
+    """
     global last_error
     if not get_api_key():
         last_error = ("no API key found. Add ANTHROPIC_API_KEY in Streamlit's Settings > Secrets, "
                       "or in the .env file when running on a laptop.")
         return None
     try:
-        msg = _client().messages.create(model=_model(), max_tokens=max_tokens,
-                                        system=system, messages=[{"role": "user", "content": user}])
-        last_error = None
-        return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+        msg = _client().messages.create(
+            model=_model(), max_tokens=max_tokens, system=system,
+            messages=[{"role": "user", "content": user}],
+            tools=[tool], tool_choice={"type": "tool", "name": tool["name"]})
     except Exception as e:
         last_error = _explain(e)
         return None
+    for block in msg.content:
+        if getattr(block, "type", "") == "tool_use" and isinstance(block.input, dict):
+            last_error = None
+            return block.input
+    if getattr(msg, "stop_reason", "") == "max_tokens":
+        last_error = "Claude's answer was cut off because it was too long."
+    else:
+        last_error = "Claude replied, but not in the expected format."
+    return None
 
 
-def _json_from(text: str | None):
-    if not text:
-        return None
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return None
-
-
-# ---------- Job 1: categories for unplaced merchants ----------
+# ---------- Job 1: categories for merchants the rules could not place ----------
 
 CATEGORY_SYSTEM = (
-    "You sort bank transaction descriptions into spending categories for a Canadian budgeting tool. "
-    "Answer with JSON only, in the form {\"<description>\": \"<category>\"}. "
-    "Use exactly one of these categories: " + ", ".join(SPENDING_CATEGORIES) + ". "
-    "If you cannot tell, use \"Other\". Do not add any other text."
+    "You sort Canadian bank and credit-card transaction descriptions into spending categories for a "
+    "budgeting tool. Descriptions often include a store number, a city and province, and a card-processor "
+    "prefix such as 'SQ *' (Square, usually a small cafe, shop or restaurant), 'TST*' (Toast, a restaurant), "
+    "'DD *' (DoorDash) or 'PAYPAL *'. Use your knowledge of Canadian businesses. "
+    "Pick 'Miscellaneous' only when you genuinely cannot tell what kind of business it is."
 )
-CATEGORY_EXAMPLES = (
-    "Examples:\n"
-    "SQ *JOE'S DINER -> Dining Out\n"
-    "PRESTO FARE -> Transport\n"
-    "DOLLARAMA #123 -> Shopping\n"
-)
+CATEGORY_TOOL = {
+    "name": "record_categories",
+    "description": "Record one category for each numbered transaction description.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer", "description": "The number of the description."},
+                        "category": {"type": "string", "enum": SPENDING_CATEGORIES},
+                    },
+                    "required": ["id", "category"],
+                },
+            }
+        },
+        "required": ["results"],
+    },
+}
+BATCH = 60
 
 
 def suggest_categories(descriptions: list[str]) -> dict[str, str] | None:
-    """Return {description: category} for the ones Claude placed, or None if AI is unavailable."""
+    """Return {description: category} for the descriptions Claude placed.
+
+    Sends the descriptions in batches so long lists are not cut off. Returns None
+    only if no batch could be answered (AI unavailable).
+    """
     if not descriptions:
         return {}
-    text = _ask(CATEGORY_SYSTEM, CATEGORY_EXAMPLES + "\nDescriptions:\n" + "\n".join(descriptions[:100]))
-    data = _json_from(text)
-    if not isinstance(data, dict):
-        return None
-    return {d: c for d, c in data.items() if d in descriptions and c in SPENDING_CATEGORIES}
+    out: dict[str, str] = {}
+    answered = False
+    for start in range(0, min(len(descriptions), 600), BATCH):
+        batch = descriptions[start:start + BATCH]
+        lines = "\n".join(f"{i}. {d}" for i, d in enumerate(batch))
+        data = _ask_tool(CATEGORY_SYSTEM, "Categorize these descriptions:\n" + lines, CATEGORY_TOOL,
+                         max_tokens=40 * len(batch) + 300)
+        if not data or not isinstance(data.get("results"), list):
+            continue
+        answered = True
+        for item in data["results"]:
+            try:
+                i, cat = int(item["id"]), item["category"]
+            except (KeyError, TypeError, ValueError):
+                continue
+            if 0 <= i < len(batch) and cat in SPENDING_CATEGORIES:
+                out[batch[i]] = cat
+    return out if answered else None
 
 
 # ---------- Job 2: insights and suggestion wording ----------
@@ -143,7 +179,7 @@ INSIGHT_SYSTEM = (
     "- Be non-judgmental: describe, do not scold. Say 'grew' or 'was your biggest category', not 'wasted'.\n"
     "- Never give investment, credit, debt, loan or tax advice. Talk only about spending habits.\n"
     "- Then rewrite the saving suggestion from the facts as one or two encouraging sentences that keep its dollar figures.\n"
-    "Answer with JSON only: {\"insights\": [\"...\", \"...\"], \"suggestion\": \"...\"}"
+    "Record your answer with the record_insights tool."
 )
 
 NUM = re.compile(r"\$?\s?(\d[\d,]*(?:\.\d+)?)\s?(%)?")
@@ -170,14 +206,29 @@ def safe(text: str, allowed: set[float]) -> bool:
     return bool(text) and numbers_ok(text, allowed) and not BANNED.search(text)
 
 
+INSIGHT_TOOL = {
+    "name": "record_insights",
+    "description": "Record the spending insights and the reworded saving suggestion.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "insights": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 4,
+                         "description": "3 or 4 insights, one or two sentences each."},
+            "suggestion": {"type": "string",
+                           "description": "The saving suggestion in one or two encouraging sentences, "
+                                          "keeping its dollar figures. Empty if there is no suggestion."},
+        },
+        "required": ["insights", "suggestion"],
+    },
+}
+
+
 def write_insights(facts: dict, allowed: set[float]) -> dict | None:
     """Return {"insights": [...], "suggestion": str|None, "dropped": int} or None if AI is unavailable."""
-    text = _ask(INSIGHT_SYSTEM, json.dumps(facts, indent=1))
-    data = _json_from(text)
-    if text is not None and (not isinstance(data, dict) or not isinstance(data.get("insights"), list)):
+    data = _ask_tool(INSIGHT_SYSTEM, json.dumps(facts, indent=1), INSIGHT_TOOL, max_tokens=1500)
+    if data is None or not isinstance(data.get("insights"), list):
         global last_error
-        last_error = "Claude replied, but not in the expected format. Press Retry."
-    if not isinstance(data, dict) or not isinstance(data.get("insights"), list):
+        last_error = last_error or "Claude replied, but not in the expected format."
         return None
     raw = [str(x) for x in data["insights"]][:4]
     kept = [t for t in raw if safe(t, allowed)]
