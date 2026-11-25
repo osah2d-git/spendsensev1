@@ -26,13 +26,14 @@ BANNED = re.compile(r"\b(invest|investment|stock|etf|rrsp|tfsa|crypto|bitcoin|mo
 
 def get_api_key() -> str | None:
     key = os.environ.get("ANTHROPIC_API_KEY")
-    if key:
-        return key
-    try:  # Streamlit Community Cloud keeps keys in st.secrets
-        import streamlit as st
-        return st.secrets.get("ANTHROPIC_API_KEY")
-    except Exception:
-        return None
+    if not key:
+        try:  # Streamlit Community Cloud keeps keys in st.secrets
+            import streamlit as st
+            key = st.secrets.get("ANTHROPIC_API_KEY")
+        except Exception:
+            key = None
+    key = (key or "").strip().strip('"').strip("'")
+    return key or None
 
 
 def _client():
@@ -44,18 +45,51 @@ def _client():
 
 
 def _model() -> str:
-    return os.environ.get("CLAUDE_MODEL", DEFAULT_MODEL)
+    model = os.environ.get("CLAUDE_MODEL")
+    if not model:
+        try:
+            import streamlit as st
+            model = st.secrets.get("CLAUDE_MODEL")
+        except Exception:
+            model = None
+    return (model or "").strip() or DEFAULT_MODEL
+
+
+# The reason the last AI call failed, in words the user can act on (None = no failure).
+last_error: str | None = None
+
+
+def _explain(e: Exception) -> str:
+    import anthropic
+    text = str(e)
+    if isinstance(e, anthropic.AuthenticationError):
+        return "the API key was rejected. Check that ANTHROPIC_API_KEY is copied in full, starting with sk-ant-."
+    if isinstance(e, anthropic.PermissionDeniedError):
+        return "this API key is not allowed to use the model. Check the key's workspace in the Claude Console."
+    if isinstance(e, anthropic.NotFoundError):
+        return f"the model '{_model()}' was not found. Set CLAUDE_MODEL to a current model, e.g. claude-haiku-5-5."
+    if isinstance(e, anthropic.RateLimitError):
+        return "too many requests right now (rate limit). Wait a minute and press Retry."
+    if isinstance(e, anthropic.BadRequestError) and "credit" in text.lower():
+        return "the Anthropic account has no credit left. Add credit under Billing in the Claude Console."
+    if isinstance(e, anthropic.APIConnectionError):
+        return "the app could not reach the Anthropic API (network problem)."
+    return f"{type(e).__name__}: {text[:200]}"
 
 
 def _ask(system: str, user: str, max_tokens: int = 800) -> str | None:
-    client = _client()
-    if client is None:
+    global last_error
+    if not get_api_key():
+        last_error = ("no API key found. Add ANTHROPIC_API_KEY in Streamlit's Settings > Secrets, "
+                      "or in the .env file when running on a laptop.")
         return None
     try:
-        msg = client.messages.create(model=_model(), max_tokens=max_tokens, temperature=0,
-                                     system=system, messages=[{"role": "user", "content": user}])
+        msg = _client().messages.create(model=_model(), max_tokens=max_tokens,
+                                        system=system, messages=[{"role": "user", "content": user}])
+        last_error = None
         return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
-    except Exception:
+    except Exception as e:
+        last_error = _explain(e)
         return None
 
 
@@ -140,6 +174,9 @@ def write_insights(facts: dict, allowed: set[float]) -> dict | None:
     """Return {"insights": [...], "suggestion": str|None, "dropped": int} or None if AI is unavailable."""
     text = _ask(INSIGHT_SYSTEM, json.dumps(facts, indent=1))
     data = _json_from(text)
+    if text is not None and (not isinstance(data, dict) or not isinstance(data.get("insights"), list)):
+        global last_error
+        last_error = "Claude replied, but not in the expected format. Press Retry."
     if not isinstance(data, dict) or not isinstance(data.get("insights"), list):
         return None
     raw = [str(x) for x in data["insights"]][:4]

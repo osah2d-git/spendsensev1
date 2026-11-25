@@ -18,7 +18,8 @@ DATA = Path(__file__).resolve().parent.parent / "data"
 
 
 def load(*names, folder="sample"):
-    return combine([(n, (DATA / folder / n).read_bytes()) for n in names])
+    tx, problems, notes, _ = combine([(n, (DATA / folder / n).read_bytes()) for n in names])
+    return tx, problems, notes
 
 
 @pytest.fixture
@@ -139,6 +140,24 @@ def test_ai_unavailable_without_key(monkeypatch, priya):
     monkeypatch.setattr(ai, "get_api_key", lambda: None)
     assert ai.suggest_categories(["SQ *MOUNTAIN BREW"]) is None
     assert ai.write_insights({"a": 1}, {1.0}) is None
+    assert "no API key found" in ai.last_error
+
+
+def test_ai_error_reason_is_reported(monkeypatch):
+    import anthropic
+    import httpx2 as httpx
+    req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    err = anthropic.AuthenticationError("invalid x-api-key", response=httpx.Response(401, request=req), body=None)
+
+    class Boom:
+        class messages:
+            @staticmethod
+            def create(**k):
+                raise err
+    monkeypatch.setattr(ai, "get_api_key", lambda: "sk-ant-test")
+    monkeypatch.setattr(ai, "_client", lambda: Boom)
+    assert ai.write_insights({"a": 1}, {1.0}) is None
+    assert "API key was rejected" in ai.last_error
 
 
 def test_ai_output_is_filtered(monkeypatch, priya):
@@ -151,3 +170,64 @@ def test_ai_output_is_filtered(monkeypatch, priya):
     assert out["insights"] == ["Dining out grew 40.0% to $612.00."]
     assert out["dropped"] == 2
     assert out["suggestion"].startswith("Try bringing")
+
+
+# ---------- real bank export layouts ----------
+
+def one(name, text, flip=None):
+    tx, problems, notes, infos = combine([(name, text.encode())], {name: flip} if flip is not None else None)
+    return tx, problems, infos
+
+
+def test_credit_card_with_positive_purchases_is_flipped():
+    text = ("Date,Description,Amount\n2026-03-01,STARBUCKS,5.25\n2026-03-02,SAFEWAY,80.10\n"
+            "2026-03-03,NETFLIX.COM,20.99\n2026-03-20,PAYMENT THANK YOU,-106.34\n")
+    tx, problems, infos = one("visa.csv", text)
+    tx = apply_rules(tx)
+    assert infos[0]["flipped"] is True
+    assert (tx["Category"] == INCOMING).sum() == 0
+    assert set(tx["Category"]) >= {"Dining Out", "Groceries", "Subscriptions", TRANSFERS}
+
+
+def test_user_can_override_the_sign():
+    text = "Date,Description,Amount\n2026-03-01,STARBUCKS,5.25\n2026-03-02,SAFEWAY,80.10\n"
+    tx, _, infos = one("x.csv", text, flip=False)
+    assert infos[0]["flipped"] is False and (tx["Amount"] > 0).all()
+
+
+def test_rbc_style_columns():
+    text = ('"Account Type","Account Number","Transaction Date","Cheque Number","Description 1","Description 2","CAD$","USD$"\n'
+            'Chequing,01234-5678901,3/2/2026,,SAFEWAY #8890,CALGARY AB,-54.20,\n'
+            'Chequing,01234-5678901,3/5/2026,,PAYROLL DEP,,3100.00,\n')
+    tx, problems, infos = one("rbc.csv", text)
+    assert problems == [] and len(tx) == 2
+    assert tx.loc[0, "Description"] == "SAFEWAY #8890 CALGARY AB" and tx.loc[0, "Amount"] == -54.20
+    assert not tx.astype(str).apply(lambda c: c.str.contains("5678901")).any().any()
+
+
+def test_td_style_no_header_debit_credit():
+    text = ("03/02/2026,SAFEWAY #8890,54.20,,1200.00\n"
+            "03/05/2026,PAYROLL DEP,,3100.00,4300.00\n"
+            "03/09/2026,TIM HORTONS #4412,4.50,,4295.50\n")
+    tx, problems, infos = one("td.csv", text)
+    assert problems == [] and len(tx) == 3
+    assert sorted(tx["Amount"]) == [-54.20, -4.50, 3100.00]
+    assert infos[0]["debit_credit"]
+
+
+def test_bmo_style_spaces_and_compact_dates():
+    text = ("Item #,Card #,Transaction Date,Posting Date,Transaction Amount,Description\n"
+            "1,'5191230012345678',20260302,20260303,45.10,EARLS KITCHEN + BAR\n"
+            "2,'5191230012345678',20260304,20260305,12.99,SPOTIFY\n"
+            "3,'5191230012345678',20260310,20260310,-58.09,PAYMENT RECEIVED - THANK YOU\n")
+    tx, problems, infos = one("bmo.csv", text)
+    tx = apply_rules(tx)
+    assert problems == [] and len(tx) == 3
+    assert str(tx.loc[0, "Date"].date()) == "2026-03-02"
+    assert list(tx["Category"]) == ["Dining Out", "Subscriptions", TRANSFERS]
+
+
+def test_withdrawals_and_deposits_columns():
+    text = "Date,Description,Withdrawals,Deposits,Balance\n2026-03-02,SAFEWAY,54.20,,100\n2026-03-03,PAY,,500,600\n"
+    tx, problems, _ = one("bank.csv", text)
+    assert sorted(tx["Amount"]) == [-54.20, 500.0]

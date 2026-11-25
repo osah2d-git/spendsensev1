@@ -17,3 +17,13 @@ Prompts and agent interactions here feed the article.
 - Tests a person clicked through and passed: 1, 2, 3, 6, 7, 8, 9, 10 (automated browser run)
 - Known problems: insight wording not yet tested with a real API key (tests 4 and 5)
 - Next step: add the API key to .env, run tests 4 and 5, then M3 edge cases with real-looking bank exports
+
+### 22 Nov 2026 | Fixes from David's first real test
+- Who: David, with Claude (claude.ai)
+- Problems found: (1) AI insights always "unavailable"; (2) almost every transaction categorized as "Money in (ignored)"
+- Causes: (1) the app hid the real error, so we could not tell whether the key, credit or model was the problem;
+  (2) the uploaded credit-card export shows purchases as positive numbers, while SpendSense assumed negative = spending
+- Fixes: the AI notice now shows the reason and a Retry button; the loader detects positive-purchase files and flips
+  them (with a per-file override), and reads Debit/Credit columns, headerless files and other column names
+- Tests: 24 automated checks pass; positive-purchase card file checked in the browser
+- Next step: add the API key in Streamlit Secrets, read the reason shown if insights still fail, run tests 4 and 5

@@ -16,8 +16,11 @@ Team: Alizeh Chaudhry, Angela Joseph, Justin Liu, Tara O'Desse, David Osah.
 
 ## Main features
 
-- **Multi-bank upload.** One CSV per bank (Date, Description, Amount, Bank). Files are checked, combined and
-  sorted by date. Account numbers and any other extra columns are dropped first.
+- **Multi-bank upload.** One CSV per bank. Reads SpendSense's own layout (Date, Description, Amount, Bank) and common
+  bank exports: other column names (Transaction Date, CAD$, Description 1/2), separate Debit/Credit or
+  Withdrawals/Deposits columns, files with no header row (TD/CIBC style), and credit cards that show purchases as
+  positive numbers (detected automatically, with a per-file override under *How your files were read*). Account
+  numbers, balances and any other extra columns are dropped first.
 - **No double counting.** Money coming in (pay, refunds) is ignored. Credit-card payments and transfers between
   your own accounts go to *Transfers (excluded)*.
 - **Categories you can fix.** Merchant rules place most transactions. Claude suggests a category for the rest,
@@ -54,7 +57,8 @@ Safeguards in `core/ai.py`:
   number that does not match is hidden, and the page says how many were hidden.
 - Text that mentions investing, credit, loans or tax is hidden.
 - If there is no API key or the call fails, the app still shows every category, total, chart and the saving
-  estimate. It shows a notice that AI insights are unavailable.
+  estimate. It shows a notice with the reason (no key, key rejected, no credit, model not found, network) and a
+  Retry button.
 
 ## Run it on your laptop
 
@@ -91,11 +95,13 @@ planted so that testers know the right answer:
 
 ## Test evidence
 
-**Automated:** `python -m pytest -q` runs 17 checks of the calculated parts (17 passed on 21 Nov 2026):
+**Automated:** `python -m pytest -q` runs 24 checks (24 passed on 22 Nov 2026):
 combining two banks into 65 rows with no account numbers, $87.00 subscriptions, dining $437.00 to $612.00
 (+40.0%), fixing a category updates the total, card payments excluded, income conversion (2,000 bi-weekly =
 $4,333.33 a month), dining = 14.1% of income, both saving suggestions, the three bad files, odd amounts, the
-2,000-row file, the number check, the advice filter, and the no-API-key fallback.
+2,000-row file, the number check, the advice filter, the no-API-key fallback and its message, a rejected API key,
+and real-bank layouts (positive credit-card purchases, sign override, RBC-style columns, TD-style file with no header,
+BMO-style compact dates, Withdrawals/Deposits columns).
 
 **Click-through:** the acceptance tests in `PRD.md` are run by a person before each saved version. Results:
 
@@ -113,8 +119,8 @@ $4,333.33 a month), dining = 14.1% of income, both saving suggestions, the three
 
 ## Known limitations
 
-- Reads one CSV layout (Date, Description, Amount, Bank, with negative amounts as money out). Real bank exports
-  vary; a file with separate Debit and Credit columns is not yet supported.
+- Bank exports vary. Common Canadian layouts are handled, but an unusual file may need its columns renamed or its
+  spending sign set by hand under *How your files were read*.
 - Merchant rules are a starter list for Calgary-area merchants. Unknown merchants depend on Claude or the user.
 - Refunds are ignored as money in, so a refunded purchase still counts as spending.
 - A transfer to another person (for example, rent by e-transfer) is counted as spending unless the user changes it.

@@ -39,21 +39,26 @@ st.markdown("""
 
 
 # ---------- state ----------
-def load_files(files: list[tuple[str, bytes]]):
-    tx, problems, notes = combine(files)
+def load_files(files: list[tuple[str, bytes]], flips: dict | None = None):
+    st.session_state.files = files
+    st.session_state.flips = flips or {}
+    tx, problems, notes, infos = combine(files, st.session_state.flips)
     st.session_state.problems = problems
     st.session_state.notes = notes
+    st.session_state.infos = infos
     st.session_state.ai_cache = {}
     if tx.empty:
         st.session_state.tx = None
         return
     tx = apply_rules(tx)
     st.session_state.ai_categories = "off"
+    st.session_state.ai_cat_error = None
     unplaced = unplaced_merchants(tx)
     if unplaced:
         placed = ai.suggest_categories(unplaced)
         if placed is None:
             st.session_state.ai_categories = "unavailable"
+            st.session_state.ai_cat_error = ai.last_error
         else:
             st.session_state.ai_categories = "on"
             for desc, cat in placed.items():
@@ -63,7 +68,8 @@ def load_files(files: list[tuple[str, bytes]]):
     st.session_state.tx = tx
 
 
-for k, v in {"tx": None, "problems": [], "notes": [], "ai_cache": {}, "ai_categories": "off"}.items():
+for k, v in {"tx": None, "problems": [], "notes": [], "ai_cache": {}, "ai_categories": "off", "files": [],
+             "flips": {}, "infos": [], "ai_cat_error": None}.items():
     st.session_state.setdefault(k, v)
 
 # ---------- sidebar: income ----------
@@ -116,9 +122,29 @@ if n_tr:
     msgs.append(f"{n_tr} card payment(s) or transfer(s) between your own accounts were excluded so nothing is counted twice.")
 for n in st.session_state.notes + msgs:
     st.caption("ℹ️ " + n)
-if st.session_state.ai_categories == "unavailable" or (not ai.get_api_key() and (tx["Category"] == NEEDS_REVIEW).any()):
-    st.warning("AI suggestions are unavailable, so merchants the rules could not place are marked "
-               "\"Needs review\". You can set their category in the table.")
+
+# How each file was read, with a way to fix the sign if the automatic check got it wrong.
+with st.expander("How your files were read", expanded=any(i["flipped"] for i in st.session_state.infos)):
+    st.caption("Banks write spending differently. Chequing accounts usually show it as negative numbers; "
+               "many credit cards show purchases as positive numbers. If a file's spending shows up as "
+               "\"Money in (ignored)\", change its setting here.")
+    new_flips = dict(st.session_state.flips)
+    for info in st.session_state.infos:
+        if info["debit_credit"]:
+            st.write(f"**{info['file']}**: separate Debit and Credit columns (Debit = spending).")
+            continue
+        options = ["Negative numbers (e.g. -45.00)", "Positive numbers (e.g. 45.00)"]
+        choice = st.radio(f"In **{info['file']}**, spending is shown as:", options,
+                          index=1 if info["flipped"] else 0, horizontal=True, key=f"flip_{info['file']}")
+        new_flips[info["file"]] = choice == options[1]
+    if any(new_flips.get(i["file"], i["flipped"]) != i["flipped"] for i in st.session_state.infos if not i["debit_credit"]):
+        load_files(st.session_state.files, new_flips)
+        st.rerun()
+
+if st.session_state.ai_categories == "unavailable":
+    st.warning("AI category suggestions are unavailable, so merchants the rules could not place are marked "
+               "\"Needs review\". You can set their category in the table.  \n"
+               f"**Reason:** {st.session_state.ai_cat_error or 'unknown'}")
 
 # ---------- transactions with editable categories ----------
 st.subheader("1. Check the categories")
@@ -184,11 +210,15 @@ allowed = allowed_numbers(facts)
 key = json.dumps(facts, sort_keys=True, default=str)
 if key not in st.session_state.ai_cache:
     with st.spinner("Claude is writing your insights..."):
-        st.session_state.ai_cache[key] = ai.write_insights(facts, allowed)
-result = st.session_state.ai_cache[key]
+        st.session_state.ai_cache[key] = (ai.write_insights(facts, allowed), ai.last_error)
+result, ai_error = st.session_state.ai_cache[key]
 
 if result is None:
-    st.warning("AI insights are unavailable right now. Your totals, chart and saving estimate above are still correct.")
+    st.warning("AI insights are unavailable right now. Your totals, chart and saving estimate are still correct.  \n"
+               f"**Reason:** {ai_error or 'unknown'}")
+    if st.button("Retry AI insights"):
+        st.session_state.ai_cache.pop(key, None)
+        st.rerun()
 else:
     cols = st.columns(2)
     for i, text in enumerate(result["insights"]):
