@@ -32,7 +32,11 @@ ALIASES = {
     "debit": ["debit", "debits", "withdrawals", "withdrawal", "money out", "debit amount", "withdrawal amount"],
     "credit": ["credit", "credits", "deposits", "deposit", "money in", "credit amount", "deposit amount"],
     "bank": ["bank", "institution", "account name"],
+    # A column that says Debit or Credit for each row (Scotiabank, BMO chequing), used when amounts have no sign.
+    "direction": ["type of transaction", "transaction type", "debit/credit", "dr/cr", "type"],
 }
+SPEND_WORDS = {"debit", "dr", "withdrawal", "purchase"}
+INCOME_WORDS = {"credit", "cr", "deposit", "payment", "refund"}
 
 
 class FileProblem(Exception):
@@ -117,8 +121,17 @@ def read_one(name: str, raw: bytes, flip: bool | None = None) -> tuple[pd.DataFr
         extra = df[c_extra].fillna("").astype(str).str.strip()
         desc = (desc + " " + extra).str.strip()
 
-    info = {"file": name, "auto_flip": False, "flipped": False, "debit_credit": False}
-    if c_amt:
+    info = {"file": name, "auto_flip": False, "flipped": False, "debit_credit": False, "direction": None}
+    c_dir = _find(cols, "direction")
+    words = df[c_dir].fillna("").astype(str).str.strip().str.lower() if c_dir else None
+    use_dir = (c_amt is not None and words is not None
+               and words.isin(SPEND_WORDS | INCOME_WORDS).mean() > 0.8)
+    if use_dir:
+        # Amounts are unsigned; the Debit/Credit column says which way the money went.
+        amount = df[c_amt].map(_clean_amount).abs()
+        amount = amount.where(~words.isin(SPEND_WORDS), -amount)
+        info["direction"] = c_dir
+    elif c_amt:
         amount = df[c_amt].map(_clean_amount)
         nonzero = amount.dropna()
         nonzero = nonzero[nonzero != 0]

@@ -99,7 +99,7 @@ with c1:
 with c2:
     st.write("**No files?** Try made-up sample data:")
     for label, names in SAMPLES.items():
-        if st.button(label, use_container_width=True):
+        if st.button(label, width="stretch"):
             load_files([(n, (SAMPLE_DIR / n).read_bytes()) for n in names])
 
 for p in st.session_state.problems:
@@ -167,7 +167,7 @@ show["Date"] = show["Date"].dt.date
 review_first = st.toggle("Show only items to review (Unplaced or AI-suggested)", value=False)
 view = show[show["Source"].isin(["Unplaced", "AI-suggested"])] if review_first else show
 edited = st.data_editor(
-    view, key=f"editor_{review_first}", hide_index=True, use_container_width=True, height=320,
+    view, key=f"editor_{review_first}", hide_index=True, width="stretch", height=320,
     disabled=["Date", "Description", "Amount", "Bank", "Source"],
     column_config={
         "Amount": st.column_config.NumberColumn(format="dollar"),
@@ -205,7 +205,7 @@ chart = (alt.Chart(latest).mark_bar(color="#1c7c54")
                  y=alt.Y("Category:N", sort="-x", title=None),
                  tooltip=["Category", alt.Tooltip("Spent:Q", format="$,.2f")])
          .properties(height=40 + 28 * len(latest)))
-st.altair_chart(chart, use_container_width=True)
+st.altair_chart(chart, width="stretch")
 
 table = sm.change.copy().astype(float)
 if income:
@@ -213,7 +213,7 @@ if income:
 fmt = {"Previous month": "${:,.2f}", "Latest month": "${:,.2f}", "Change $": "{:+,.2f}", "Change %": "{:+.1f}%",
        "Share of income %": "{:.1f}%"}
 st.dataframe(table.style.format({k: v for k, v in fmt.items() if k in table.columns}, na_rep="–"),
-             use_container_width=True)
+             width="stretch")
 
 # ---------- insights and suggestion ----------
 st.subheader("3. What stands out")
